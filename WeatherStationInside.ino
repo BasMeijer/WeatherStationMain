@@ -6,9 +6,10 @@
 #include <ESP8266HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include "SH1106.h"
+#include "SH1106Ui.h"
 #include "MQ135.h"
+#include <Adafruit_NeoPixel.h>
 
 // ----------------------------------------------------
 // PIN & SENSOR DEFINITIONS 
@@ -27,11 +28,13 @@ int detection = HIGH;    // no obstacle
 #define OLED_DC     D4
 #define OLED_CS     D8
 #define OLED_RESET  D0
-Adafruit_SSD1306 display(OLED_DC, OLED_RESET, OLED_CS);
-#define NUMFLAKES 10
-#define XPOS 0
-#define YPOS 1
-#define DELTAY 2
+
+SH1106 display(true, OLED_RESET, OLED_DC, OLED_CS); // FOR SPI
+SH1106Ui ui     ( &display );
+
+// LED STRIP 
+#define PIN D6
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(60, PIN, NEO_GRB + NEO_KHZ800);
 
 // ----------------------------------------------------
 // DATA VARIABLES
@@ -46,6 +49,81 @@ String raining;
 float ppm;
 float airspeed;
 
+//String actuatorTrigger;
+
+// ----------------------------------------------------
+// LCD DISPLAY FUNCTIONS & VARIABLES
+// ----------------------------------------------------
+
+bool drawFrame1(SH1106 *display, SH1106UiState* state, int x, int y) {
+
+  display->setTextAlignment(TEXT_ALIGN_LEFT);
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 5 + y, "DHT - Temp/Hum");
+
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 15 + y, "------------------------------");
+
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 25 + y, ("Temp: " + String(temperature) + " °C"));
+
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 40 + y, ("Hum: " + String(humidity) + " %"));
+
+  return false;
+}
+
+bool drawFrame2(SH1106 *display, SH1106UiState* state, int x, int y) {
+  
+  display->setTextAlignment(TEXT_ALIGN_LEFT);
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 5 + y, "Air - Speed/Pressure");
+
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 15 + y, "------------------------------");
+
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 25 + y, ("Airspeed: " + String(airspeed) + " km/h"));
+
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 40 + y, ("Pressure: " + String(airpressure) + " Pa"));
+
+  return false;
+}
+
+bool drawFrame3(SH1106 *display, SH1106UiState* state, int x, int y) {
+  
+  display->setTextAlignment(TEXT_ALIGN_LEFT);
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 5 + y, "Weather Outside");
+
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 15 + y, "------------------------------");
+
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 25 + y, ("Condition: " + raining));
+
+  return false;
+}
+
+bool drawFrame4(SH1106 *display, SH1106UiState* state, int x, int y) {
+  
+  display->setTextAlignment(TEXT_ALIGN_LEFT);
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 5 + y, "Airquality Inside");
+
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 15 + y, "------------------------------");
+
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(0 + x, 25 + y, ("CO2 PPM: " + String(ppm)));
+
+  return false;
+}
+
+int frameCount = 4;
+bool (*frames[])(SH1106 *display, SH1106UiState* state, int x, int y) = { drawFrame1,drawFrame2,drawFrame3,drawFrame4 };
+
 // ----------------------------------------------------
 // WIFI & NETWORK SETTINGS
 // ----------------------------------------------------
@@ -56,7 +134,9 @@ char ssid[] = "PinguHotspot";               // SSID of your home WiFi
 char password[] = "basbas1337";               // password of your home WiFi
 
 String httpPostUrl = "http://iot-open-server.herokuapp.com/data";
+String actuatorUrl = "http://iot-open-server.herokuapp.com/actuator/59b26059f728010004dd60a7";
 String apiToken = "b69d453c30c82a48619472ac";
+String deviceId = "59b26059f728010004dd60a7";
 
 WiFiServer server(80);
 IPAddress ip(192, 168, 43, 198);            // IP address of the server
@@ -64,7 +144,7 @@ IPAddress gateway(192, 168, 0, 1);        // gateway of your network
 IPAddress subnet(255, 255, 255, 0);       // subnet mask of your network
 
 unsigned long clientTimer = 0;
-
+unsigned long actuatorTimer = 0;
 
 // ----------------------------------------------------
 // HOMESTATION STARTUP FUNCTIONS
@@ -73,10 +153,19 @@ unsigned long clientTimer = 0;
 void setup() {
   Serial.begin(115200);
   Serial.println("Running Setup...");
-  
+
+  connectToWifiNetwork();
+    
   pinMode(IR, INPUT); 
   
-  connectToWifiNetwork();
+  ui.setTargetFPS(30);
+  ui.setTimePerFrame(2000);
+  ui.setFrameAnimation(SLIDE_LEFT);
+  ui.setFrames(frames, frameCount);
+  ui.init();
+
+  strip.begin();
+  strip.show(); // Initialize all pixels to 'off'
   
   delay(5000);
 }
@@ -89,13 +178,13 @@ void setup() {
 void loop() {
 
   receiveClientMessages();
-  
-  detection = digitalRead(IR);
-  
-  if(detection == LOW){
-    showDisplay(ppm);
-  }
 
+  ui.update();      // Update UI of the oled screen
+    
+  if (millis() - actuatorTimer > 10000) {    // stops and restarts the WiFi server after 30 sec
+    getActuator();
+  }
+  
   if (millis() - clientTimer > 30000) {    // stops and restarts the WiFi server after 30 sec
     Serial.println("Restarting Server");
     WiFi.disconnect();                     // idle time
@@ -115,7 +204,6 @@ void receiveClientMessages(){
   WiFiClient client = server.available();
   if (client) {
     if (client.connected()) {
-      digitalWrite(LED_BUILTIN, LOW);  // to show the communication only (inverted logic)
       Serial.println(".");            // Dot Dot try connecting
       String request = client.readStringUntil('\r');    // receives the message from the client
 
@@ -146,6 +234,8 @@ void receiveClientMessages(){
       Serial.println(airspeedval);
       Serial.println("---------------------------");
 
+      ui.update();      // Update UI of the oled screen
+      
       client.flush();
     }
     client.stop();                // tarminates the connection with the client
@@ -153,6 +243,7 @@ void receiveClientMessages(){
     
     String dataToSend = createDataString();
     Serial.println(dataToSend);
+  
     postData(dataToSend);
   }  
 }
@@ -203,52 +294,6 @@ String createDataString(){
   return dataToSend;
 }
 
-
-// ----------------------------------------------------
-// LCD DISPLAY FUNCTIONS
-// ----------------------------------------------------
-
-void showDisplay(float ppm){
-    // by default, we'll generate the high voltage from the 3.3v line internally! (neat!)
-  display.begin(SSD1306_SWITCHCAPVCC);
-
-  // Clear the buffer.
-  display.clearDisplay();
-
-  // text display tests
-  display.setTextSize(1);
-  display.setTextColor(WHITE);
-  display.setCursor(0,0);
-  display.println("Hello, Bas!");
-  display.println("-------------");
-
-  display.setTextColor(WHITE);
-  display.println("Temperature:");
-
-  display.setTextSize(1.5);
-  display.setTextColor(BLACK, WHITE); // 'inverted' text
-  display.println(temperature);
-
-  display.setCursor(0,15);
-  display.setTextColor(WHITE);
-  display.println("-------------");
-
-  display.setTextSize(1);
-  display.setTextColor(WHITE);
-  display.println("Humidity:");
-
-  display.setTextSize(1);
-  display.setTextColor(BLACK, WHITE); // 'inverted' text
-  display.println(String(humidity));
-  
-  display.display();
-  delay(5000);
-  display.clearDisplay();
-  display.display();
-}
-
-
-
 // ----------------------------------------------------
 // WIFI & NETWORK FUNCTIONS
 // ----------------------------------------------------
@@ -258,6 +303,7 @@ void server_start(byte restart) {
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
   }
+
   server.begin();
   delay(500);
   clientTimer = millis();
@@ -291,7 +337,70 @@ void postData(String stringToPost) {
     Serial.println(httpCode);
     Serial.println(payload);
     Serial.println("POST DATA SUCCESFUL!");
+
+    http.end();
+  } else {
+    Serial.println("Wifi connection failed, retrying.");
+    connectToWifiNetwork();
+  }
+}
+
+void getActuator(){
+  actuatorTimer = millis();
+  if (WiFi.status() == WL_CONNECTED) { //Check WiFi connection status
+    http.begin(actuatorUrl);  //Specify request destination
+    int httpCode = http.GET();                                                                  //Send the request
+ 
+    if (httpCode > 0) { //Check the returning code
+      String payload = http.getString();   //Get the request response payload
+      Serial.println("Actuator payload: ");
+      Serial.println(payload);
+
+      StaticJsonBuffer<300> JSONBuffer;
+      JsonObject&  parsed= JSONBuffer.parseObject(payload);
+      
+      const char * actuatorTrigger = parsed["trigger"];
+      
+      if(String(actuatorTrigger) == "true"){
+        Serial.println("trigger is true");  
+        setActuatorInactive();
+
+        delay(1000);
+        //   Ledstrip init
+        strip.begin();
+        strip.show(); // Initialize all pixels to 'off'
+      
+        colorWipe(strip.Color(0, 0, 100), 100); // Blue
+      
+        colorWipe(strip.Color(0, 0, 0), 100); // Off
+        strip.show(); // Initialize all pixels to 'off'
     
+      }
+    }
+    
+    http.end();   //Close connection
+  }  
+}
+
+void setActuatorInactive(){
+
+  StaticJsonBuffer<200> jsonBuffer;
+  JsonObject& jsonRoot = jsonBuffer.createObject();
+  jsonRoot["trigger"] = "false";
+  
+  String dataToSend;
+  jsonRoot.printTo(dataToSend);
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    http.begin(actuatorUrl);
+    http.addHeader("Content-Type", "application/json");
+    int httpCode = http.POST(dataToSend);
+    String payload = http.getString();
+
+    Serial.println(httpCode);
+    Serial.println(payload);
+    Serial.println("POST ACTUATOR SUCCESFUL!");
+
     http.end();
   } else {
     Serial.println("Wifi connection failed, retrying.");
@@ -319,4 +428,14 @@ String getValue(String data, char separator, int index)
     }
     return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
 }
+
+// Fill the dots one after the other with a color
+void colorWipe(uint32_t c, uint8_t wait) {
+  for(uint16_t i=0; i<strip.numPixels(); i++) {
+    strip.setPixelColor(i, c);
+    strip.show();
+    delay(wait);
+  }
+}
+
 
